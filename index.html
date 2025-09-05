@@ -2,11 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Expert Collectibles Appraiser — KeepOrCash</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>KeepOrCash</title>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.js"></script>
+    <main>
+      <h1>Ask the AI</h1>
+      <form id="ask-form">
+        <input id="question" type="text" placeholder="dracaufeu edition 1" required />
+        <button type="submit">Ask</button>
+      </form>
+      <pre id="answer"></pre>
+
+      <h2>Upload an image</h2>
+      <form id="upload-form">
+        <input id="file" type="file" accept="image/*" required />
+        <button type="submit">Upload</button>
+      </form>
+      <pre id="upload-result"></pre>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
