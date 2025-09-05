@@ -1,4 +1,6 @@
 // api/ask.js
+// Node runtime: handles JSON body as req.body
+
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
@@ -6,7 +8,6 @@ export default async function handler(req, res) {
       return;
     }
 
-    // In Node serverless, JSON body is already parsed if sent as application/json
     const { question, context } = (req.body ?? {});
     if (!question) {
       res.status(400).json({ error: 'Missing question' });
@@ -19,11 +20,11 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 20s timeout for the upstream request
+    // 20s timeout for upstream call
     const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 20000);
+    const timer = setTimeout(() => controller.abort(), 20000);
 
-    const openaiResp = await fetch('https://api.openai.com/v1/chat/completions', {
+    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -42,15 +43,15 @@ export default async function handler(req, res) {
       throw new Error(e?.name === 'AbortError' ? 'Upstream timeout' : (e?.message || 'OpenAI fetch failed'));
     });
 
-    clearTimeout(t);
+    clearTimeout(timer);
 
-    if (!openaiResp.ok) {
-      const detail = await openaiResp.text().catch(() => '');
+    if (!resp.ok) {
+      const detail = await resp.text().catch(() => '');
       res.status(502).json({ error: 'OpenAI error', detail });
       return;
     }
 
-    const data = await openaiResp.json();
+    const data = await resp.json();
     const answer = data?.choices?.[0]?.message?.content ?? '';
     res.status(200).json({ answer });
   } catch (e) {
