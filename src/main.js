@@ -1,6 +1,5 @@
 import { ask, uploadFile } from './api.js';
 
-// Quick DOM helpers
 const $ = (sel) => document.querySelector(sel);
 
 const askForm = $('#ask-form');
@@ -13,7 +12,7 @@ const fileInput = $('#file');
 const uploadBtn = $('#upload-btn');
 const uploadResultEl = $('#upload-result');
 
-// ASK flow
+// Ask flow
 askForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const q = (askInput.value || '').trim();
@@ -32,7 +31,7 @@ askForm?.addEventListener('submit', async (e) => {
   }
 });
 
-// UPLOAD flow
+// Upload flow
 uploadForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const f = fileInput.files?.[0];
