@@ -1,4 +1,4 @@
-// Frontend helpers for calling your API with timeouts
+// src/api.js — Frontend helpers with timeouts so UI doesn't spin forever.
 
 async function postJSON(url, body, ms = 25000) {
   const ctrl = new AbortController();
@@ -11,7 +11,7 @@ async function postJSON(url, body, ms = 25000) {
       signal: ctrl.signal
     });
     let data = {};
-    try { data = await r.json(); } catch { /* ignore parse errors */ }
+    try { data = await r.json(); } catch {}
     if (!r.ok) throw new Error(data?.error || r.statusText || 'Request failed');
     return data;
   } finally {
@@ -25,7 +25,7 @@ async function postForm(url, fd, ms = 25000) {
   try {
     const r = await fetch(url, { method: 'POST', body: fd, signal: ctrl.signal });
     let data = {};
-    try { data = await r.json(); } catch { /* ignore parse errors */ }
+    try { data = await r.json(); } catch {}
     if (!r.ok) throw new Error(data?.error || r.statusText || 'Upload failed');
     return data;
   } finally {
@@ -42,4 +42,9 @@ export async function uploadFile(file) {
   const fd = new FormData();
   fd.append('file', file);
   return await postForm('/api/upload', fd);
+}
+
+// Optional: example chat wrapper if you ever want multi-turn
+export async function chat(messages) {
+  return await postJSON('/api/chat', { messages });
 }
