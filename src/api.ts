@@ -1,18 +1,4 @@
-// src/api.ts
-function withTimeout<T>(p: Promise<T>, ms = 25_000): Promise<T> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  // @ts-ignore - we pass the signal into fetch below
-  (p as any)._signal = ctrl.signal;
-  return Promise.race([
-    p.finally(() => clearTimeout(t)),
-    new Promise<T>((_, rej) => {
-      ctrl.signal.addEventListener('abort', () => rej(new Error('Request timed out')));
-    })
-  ]);
-}
-
-async function postJSON(url: string, body: any, ms = 25_000) {
+async function postJSON(url: string, body: any, ms = 25000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -31,7 +17,7 @@ async function postJSON(url: string, body: any, ms = 25_000) {
   }
 }
 
-async function postForm(url: string, fd: FormData, ms = 25_000) {
+async function postForm(url: string, fd: FormData, ms = 25000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
