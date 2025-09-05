@@ -1,5 +1,5 @@
 // api/ask.js
-// Node runtime: handles JSON body as req.body
+// Node serverless function: answers a single question with OpenAI.
 
 export default async function handler(req, res) {
   try {
@@ -20,7 +20,7 @@ export default async function handler(req, res) {
       return;
     }
 
-    // 20s timeout for upstream call
+    // Timeout for upstream request
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20000);
 
