@@ -1,6 +1,8 @@
-async function postJSON(url: string, body: any, ms = 25000) {
+// Frontend helpers for calling your API with timeouts
+
+async function postJSON(url, body, ms = 25000) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
+  const timer = setTimeout(() => ctrl.abort(), ms);
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -8,35 +10,35 @@ async function postJSON(url: string, body: any, ms = 25000) {
       body: JSON.stringify(body),
       signal: ctrl.signal
     });
-    let data: any = {};
-    try { data = await r.json(); } catch {}
+    let data = {};
+    try { data = await r.json(); } catch { /* ignore parse errors */ }
     if (!r.ok) throw new Error(data?.error || r.statusText || 'Request failed');
     return data;
   } finally {
-    clearTimeout(t);
+    clearTimeout(timer);
   }
 }
 
-async function postForm(url: string, fd: FormData, ms = 25000) {
+async function postForm(url, fd, ms = 25000) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
+  const timer = setTimeout(() => ctrl.abort(), ms);
   try {
     const r = await fetch(url, { method: 'POST', body: fd, signal: ctrl.signal });
-    let data: any = {};
-    try { data = await r.json(); } catch {}
+    let data = {};
+    try { data = await r.json(); } catch { /* ignore parse errors */ }
     if (!r.ok) throw new Error(data?.error || r.statusText || 'Upload failed');
     return data;
   } finally {
-    clearTimeout(t);
+    clearTimeout(timer);
   }
 }
 
-export async function ask(question: string, context?: string): Promise<string> {
+export async function ask(question, context) {
   const data = await postJSON('/api/ask', { question, context });
-  return (data?.answer as string) || '';
+  return data?.answer || '';
 }
 
-export async function uploadFile(file: File): Promise<{ ok: boolean; size?: number }> {
+export async function uploadFile(file) {
   const fd = new FormData();
   fd.append('file', file);
   return await postForm('/api/upload', fd);
