@@ -1,34 +1,57 @@
 // src/api.ts
-export async function ask(question: string, context?: string): Promise<string> {
-  const r = await fetch('/api/ask', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question, context })
-  });
+function withTimeout<T>(p: Promise<T>, ms = 25_000): Promise<T> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  // @ts-ignore - we pass the signal into fetch below
+  (p as any)._signal = ctrl.signal;
+  return Promise.race([
+    p.finally(() => clearTimeout(t)),
+    new Promise<T>((_, rej) => {
+      ctrl.signal.addEventListener('abort', () => rej(new Error('Request timed out')));
+    })
+  ]);
+}
 
-  // Try to read server's JSON error details (so you see real errors)
-  let data: any = {};
-  try { data = await r.json(); } catch { /* ignore */ }
-
-  if (!r.ok) {
-    const msg = data?.error || r.statusText || 'Request failed';
-    throw new Error(msg);
+async function postJSON(url: string, body: any, ms = 25_000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal
+    });
+    let data: any = {};
+    try { data = await r.json(); } catch {}
+    if (!r.ok) throw new Error(data?.error || r.statusText || 'Request failed');
+    return data;
+  } finally {
+    clearTimeout(t);
   }
+}
+
+async function postForm(url: string, fd: FormData, ms = 25_000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { method: 'POST', body: fd, signal: ctrl.signal });
+    let data: any = {};
+    try { data = await r.json(); } catch {}
+    if (!r.ok) throw new Error(data?.error || r.statusText || 'Upload failed');
+    return data;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+export async function ask(question: string, context?: string): Promise<string> {
+  const data = await postJSON('/api/ask', { question, context });
   return (data?.answer as string) || '';
 }
 
 export async function uploadFile(file: File): Promise<{ ok: boolean; size?: number }> {
   const fd = new FormData();
   fd.append('file', file);
-
-  const r = await fetch('/api/upload', { method: 'POST', body: fd });
-
-  let data: any = {};
-  try { data = await r.json(); } catch { /* ignore */ }
-
-  if (!r.ok) {
-    const msg = data?.error || r.statusText || 'Upload failed';
-    throw new Error(msg);
-  }
-  return data;
+  return await postForm('/api/upload', fd);
 }
