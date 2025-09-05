@@ -1,12 +1,5 @@
 // api/chat.js
-// Node serverless function: accepts an array of messages for a chat-like flow.
-// Body example:
-// {
-//   "messages": [
-//     {"role":"system","content":"You are helpful."},
-//     {"role":"user","content":"Hello"}
-//   ]
-// }
+// Node serverless: multi-turn chat. Accepts { messages: [...] }.
 
 export default async function handler(req, res) {
   try {
@@ -27,6 +20,8 @@ export default async function handler(req, res) {
       return;
     }
 
+    const model = process.env.OPENAI_MODEL || 'gpt-4o';
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20000);
 
@@ -36,14 +31,8 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages,
-        temperature: 0.2
-      }),
+      body: JSON.stringify({ model, messages, temperature: 0.2 }),
       signal: controller.signal
-    }).catch((e) => {
-      throw new Error(e?.name === 'AbortError' ? 'Upstream timeout' : (e?.message || 'OpenAI fetch failed'));
     });
 
     clearTimeout(timer);
@@ -56,7 +45,7 @@ export default async function handler(req, res) {
 
     const data = await resp.json();
     const answer = data?.choices?.[0]?.message?.content ?? '';
-    res.status(200).json({ answer });
+    res.status(200).json({ answer, modelUsed: model });
   } catch (e) {
     res.status(500).json({ error: 'Unhandled server error', detail: String(e?.message ?? e) });
   }
