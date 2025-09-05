@@ -11,7 +11,6 @@ export default async function handler(req: Request) {
       });
     }
 
-    // Limit: ~4.5MB body on serverless
     const buf = Buffer.from(await file.arrayBuffer());
     if (buf.byteLength > 4_500_000) {
       return new Response(JSON.stringify({ error: 'File too large for this endpoint (limit ~4.5MB). Compress first.' }), {
@@ -19,11 +18,9 @@ export default async function handler(req: Request) {
       });
     }
 
-    // TODO: send to your vision pipeline or store via Vercel Blob, then return a result
     return new Response(JSON.stringify({ ok: true, size: buf.byteLength }), {
       status: 200, headers: { 'Content-Type': 'application/json' }
     });
-
   } catch (e: any) {
     return new Response(JSON.stringify({ error: 'Upload failed', detail: String(e?.message ?? e) }), {
       status: 500, headers: { 'Content-Type': 'application/json' }
