@@ -1,10 +1,10 @@
 # KeepOrCash (Vite + Vercel Functions)
 
-Minimal setup:
-- Static frontend via Vite
-- Serverless API routes on Vercel: `/api/ask`, `/api/upload`, `/api/chat`, `/api/hello`
+API routes:
+- `GET /api/hello` – health check
+- `POST /api/ask` – ask a text question
+- `POST /api/upload` – upload an image and get AI analysis
+- `POST /api/chat` – optional multi-turn chat
 
-## Setup
-
-1) Add environment variable in Vercel (Project → Settings → Environment Variables):
+## Environment variables (Vercel → Project → Settings → Environment Variables)
 
