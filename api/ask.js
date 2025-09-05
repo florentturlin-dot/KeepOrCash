@@ -1,17 +1,18 @@
 // api/ask.js
-// Q/R textuelle avec extraction structurée + enrichissement prix via APIs publiques.
-// Requiert: OPENAI_API_KEY
-// Optionnel: POKEMON_TCG_API_KEY (pour prix Pokémon via pokemontcg.io)
+// Évaluation texte avec pipeline complet :
+// 1) Extraction structurée (catégorie, nom, set, plateforme, etc.)
+// 2) Enrichissement via APIs spécialisées (TCG: Scryfall/YGOPRODeck/Pokémon TCG)
+// 3) Recherche web (Tavily et/ou Serper) multi-sources (eBay sold, PriceCharting, Heritage, etc.)
+// 4) Fusion des signaux de prix
+// 5) Mise en forme "rapport 8 sections" + phrase d’intro "If this [item type] is authentic..."
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
 
+/* ---------------------- OpenAI helpers ---------------------- */
 async function callOpenAIJson(messages, signal) {
-  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: OPENAI_MODEL,
       response_format: { type: 'json_object' },
@@ -20,31 +21,25 @@ async function callOpenAIJson(messages, signal) {
     }),
     signal
   });
-  if (!resp.ok) {
-    const detail = await resp.text().catch(() => '');
-    throw new Error(detail || `OpenAI HTTP ${resp.status}`);
-  }
-  const data = await resp.json();
-  const content = data?.choices?.[0]?.message?.content || '{}';
+  if (!r.ok) throw new Error(await r.text().catch(() => `OpenAI HTTP ${r.status}`));
+  const j = await r.json();
+  const content = j?.choices?.[0]?.message?.content || '{}';
   return JSON.parse(content);
 }
 
-// ---------- Pricing helpers ----------
-
+/* ---------------------- Card APIs ---------------------- */
+async function fetchJSON(url, headers) {
+  const r = await fetch(url, { headers });
+  if (!r.ok) return null;
+  return await r.json();
+}
 async function fetchMTGPrices({ name, set }) {
   if (!name) return null;
-  const base = 'https://api.scryfall.com/cards/search?q=';
-  // recherche exacte sur le nom, on liste les éditions (prints)
-  const query = `!"${name}" unique:prints${set ? ` set:${JSON.stringify(set).replaceAll('"','')}` : ''}`;
-  const url = base + encodeURIComponent(query);
-  const r = await fetch(url);
-  if (!r.ok) return null;
-  const j = await r.json();
-  if (!j?.data?.length) return null;
-
-  // on prend la première carte avec un prix USD ou EUR
-  const card = j.data.find(c => c?.prices?.usd || c?.prices?.eur || c?.prices?.usd_foil) || j.data[0];
-  const prices = card?.prices || {};
+  const query = `!"${name}" unique:prints${set ? ` set:${set.replaceAll('"','')}` : ''}`;
+  const url = 'https://api.scryfall.com/cards/search?q=' + encodeURIComponent(query);
+  const j = await fetchJSON(url);
+  const card = j?.data?.find(c => c?.prices?.usd || c?.prices?.eur || c?.prices?.usd_foil) || j?.data?.[0];
+  if (!card) return null;
   return {
     source: 'scryfall',
     url: card?.scryfall_uri || `https://scryfall.com/search?q=${encodeURIComponent(query)}`,
@@ -52,22 +47,17 @@ async function fetchMTGPrices({ name, set }) {
     collector_number: card?.collector_number,
     released_at: card?.released_at,
     prices: {
-      usd: prices.usd || null,
-      usd_foil: prices.usd_foil || null,
-      eur: prices.eur || null,
-      eur_foil: prices.eur_foil || null
+      usd: card?.prices?.usd || null,
+      usd_foil: card?.prices?.usd_foil || null,
+      eur: card?.prices?.eur || null,
+      eur_foil: card?.prices?.eur_foil || null
     }
   };
 }
-
 async function fetchYGOPrices({ name }) {
   if (!name) return null;
-  // YGOPRODeck docs: https://db.ygoprodeck.com/api-guide/
-  // "fname" = fuzzy name search
   const url = `https://db.ygoprodeck.com/api/v7/cardinfo.php?fname=${encodeURIComponent(name)}`;
-  const r = await fetch(url);
-  if (!r.ok) return null;
-  const j = await r.json();
+  const j = await fetchJSON(url);
   const card = j?.data?.[0];
   if (!card) return null;
   const p = card?.card_prices?.[0] || {};
@@ -84,143 +74,275 @@ async function fetchYGOPrices({ name }) {
     }
   };
 }
-
 async function fetchPokemonPrices({ name, set }) {
-  // Nécessite POKEMON_TCG_API_KEY (gratuit à créer)
   const key = process.env.POKEMON_TCG_API_KEY;
   if (!key || !name) return null;
-  // Docs: https://docs.pokemontcg.io/
-  // Exemple de query: q=name:"Charizard" set.name:"Base Set"
   const parts = [];
   parts.push(`name:"${name}"`);
   if (set) parts.push(`set.name:"${set}"`);
   const q = parts.join(' ');
-
   const url = `https://api.pokemontcg.io/v2/cards?q=${encodeURIComponent(q)}&pageSize=6`;
-  const r = await fetch(url, { headers: { 'X-Api-Key': key } });
-  if (!r.ok) return null;
-  const j = await r.json();
+  const j = await fetchJSON(url, { 'X-Api-Key': key });
   const card = j?.data?.[0];
   if (!card) return null;
-
-  const prices = card?.tcgplayer?.prices || card?.cardmarket?.prices || {};
   return {
     source: 'pokemontcg',
     url: card?.tcgplayer?.url || card?.images?.large || `https://api.pokemontcg.io/v2/cards?q=${encodeURIComponent(q)}`,
     set_name: card?.set?.name,
     number: card?.number,
     rarity: card?.rarity,
-    prices // structure variable selon la rareté (normal/foil/holo)
+    prices: card?.tcgplayer?.prices || card?.cardmarket?.prices || {}
   };
 }
 
-async function enrichPrices({ game, name, set }) {
-  const g = (game || '').toLowerCase();
-  if (g.includes('mtg') || g.includes('magic')) {
-    const mtg = await fetchMTGPrices({ name, set });
-    return { game: 'mtg', mtg };
+/* ---------------------- Web search (Tavily / Serper) ---------------------- */
+async function tavilySearch(query) {
+  const key = process.env.TAVILY_API_KEY;
+  if (!key) return null;
+  const r = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      api_key: key,
+      query,
+      search_depth: 'advanced',
+      include_answer: false,
+      include_images: false,
+      include_raw_content: false,
+      max_results: 6
+    })
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  return (j?.results || []).map(x => ({ title: x.title, url: x.url, snippet: x.content || x.snippet || '' }));
+}
+async function serperSearch(query) {
+  const key = process.env.SERPER_API_KEY;
+  if (!key) return null;
+  const r = await fetch('https://google.serper.dev/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+    body: JSON.stringify({ q: query, gl: 'us', num: 8 })
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const items = [...(j?.organic || []), ...(j?.shopping || [])];
+  return items.map(it => ({ title: it.title, url: it.link, snippet: it.snippet || it.price || '' }));
+}
+function uniqByHost(list) {
+  const seen = new Set();
+  const out = [];
+  for (const r of list || []) {
+    try {
+      const host = new URL(r.url).host.replace(/^www\./, '');
+      if (seen.has(host)) continue;
+      seen.add(host);
+      out.push(r);
+    } catch {}
   }
-  if (g.includes('yugioh') || g.includes('yu-gi')) {
-    const ygo = await fetchYGOPrices({ name });
-    return { game: 'yugioh', ygo };
+  return out;
+}
+async function webSearchPricingSignalsGeneric(queries) {
+  let results = [];
+  for (const q of queries) {
+    const a = await tavilySearch(q).catch(() => null);
+    const b = await serperSearch(q).catch(() => null);
+    results = results.concat(a || []).concat(b || []);
   }
-  if (g.includes('pokemon') || g.includes('pokémon')) {
-    const pkm = await fetchPokemonPrices({ name, set });
-    return { game: 'pokemon', pokemon: pkm };
-  }
-  // si on ne sait pas: on essaie dans l'ordre MTG -> YGO -> Pokémon
-  const [mtg, ygo, pkm] = await Promise.all([
-    fetchMTGPrices({ name, set }).catch(() => null),
-    fetchYGOPrices({ name }).catch(() => null),
-    fetchPokemonPrices({ name, set }).catch(() => null)
-  ]);
-  return { game: 'unknown', mtg, ygo, pokemon: pkm };
+  return uniqByHost(results).slice(0, 10);
 }
 
-function buildSummary({ query, pricing }) {
-  const lines = [];
-  lines.push(`**Item détecté**: ${query.name || 'inconnu'}`);
-  if (query.game) lines.push(`**Jeu**: ${query.game}`);
-  if (query.set) lines.push(`**Édition/Set**: ${query.set}`);
-  if (query.edition) lines.push(`**Tirage**: ${query.edition}`);
-  if (query.language) lines.push(`**Langue**: ${query.language}`);
-  if (query.number) lines.push(`**Numéro**: ${query.number}`);
-  if (query.rarity) lines.push(`**Rareté**: ${query.rarity}`);
-  if (query.condition_notes?.length) lines.push(`**État (indices visuels)**: ${query.condition_notes.join(', ')}`);
-
-  // prix
-  const p = pricing || {};
-  if (p.mtg?.prices || p.ygo?.prices || p.pokemon?.prices) {
-    lines.push('');
-    lines.push('**Prix estimés (indicatifs)**:');
+/* ---------------------- Query + category helpers ---------------------- */
+function buildQueriesForCategory(cat, q) {
+  // q: {name,set,platform,year,brand,franchise,issue_number,variant}
+  const base = [q.name, q.set, q.platform, q.brand, q.franchise, q.issue_number, q.variant, q.year].filter(Boolean).join(' ');
+  switch (cat) {
+    case 'pokemon':
+    case 'mtg':
+    case 'yugioh':
+      return [
+        `${base} price`,
+        `${base} tcgplayer price`,
+        `${base} ebay sold`,
+        `${base} graded psa price`,
+        `${base} sold listings`
+      ];
+    case 'retro_video_game':
+      return [
+        `${base} pricecharting`,
+        `${base} ebay sold`,
+        `${base} cib price`,
+        `${base} loose price`,
+        `${base} sealed price`
+      ];
+    case 'postage_stamp':
+      return [
+        `${base} Scott catalog value`,
+        `${base} StampWorld price`,
+        `${base} ebay sold`,
+        `${base} watermark UV verify`
+      ];
+    case 'toy_or_figurine':
+      return [
+        `${base} action figure price`,
+        `${base} ebay sold`,
+        `${base} sealed new price`,
+        `${base} loose price`,
+        `${base} variant value`
+      ];
+    case 'comic_book':
+      return [
+        `${base} graded price`,
+        `${base} cgc 9.8 price`,
+        `${base} heritage auctions`,
+        `${base} ebay sold`,
+        `${base} go collect price`
+      ];
+    case 'pogs':
+      return [
+        `${base} pogs price`,
+        `${base} slammer price`,
+        `${base} ebay sold`,
+        `${base} lot price`
+      ];
+    default:
+      return [`${base} price`, `${base} ebay sold`, `${base} market value`];
   }
-  if (p.mtg?.prices) {
-    const pr = p.mtg.prices;
-    lines.push(`- MTG/Scryfall (${p.mtg.set_name || 'set ?'}): USD ${pr.usd || '-'} (non-foil), USD foil ${pr.usd_foil || '-'}, EUR ${pr.eur || '-'} | Source: ${p.mtg.url}`);
-  }
-  if (p.ygo?.prices) {
-    const pr = p.ygo.prices;
-    lines.push(`- Yu-Gi-Oh!/YGOPRODeck: TCGplayer $${pr.tcgplayer || '-'}, eBay $${pr.ebay || '-'}, Amazon $${pr.amazon || '-'} | Source: ${p.ygo.url}`);
-  }
-  if (p.pokemon?.prices) {
-    lines.push(`- Pokémon/TCG API: voir grilles (normal/holo/foil) | Source: ${p.pokemon.url}`);
-  }
-
-  lines.push('');
-  lines.push('_Note_: Les prix dépendent fortement de la **condition** réelle et de la **version exacte**. Faites des photos recto/verso, bonne lumière, bordures nettes, et le code de set visible.');
-  return lines.join('\n');
 }
 
+/* ---------------------- Price fusion + Appraisal ---------------------- */
+async function callOpenAIPriceFusion({ query, apiPricing, webSnippets }, signal) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You merge pricing signals for collectibles. Output pure JSON: ' +
+            '{ "estimate_low":number, "estimate_high":number, "currency":"USD|EUR", "reasoning":string, ' +
+            '"sources":[{"title":string,"url":string}] }'
+        },
+        { role: 'user', content: JSON.stringify({ query, apiPricing, webSnippets }) }
+      ]
+    }),
+    signal
+  });
+  if (!r.ok) throw new Error(await r.text().catch(() => `OpenAI HTTP ${r.status}`));
+  const j = await r.json();
+  return JSON.parse(j?.choices?.[0]?.message?.content || '{}');
+}
+
+async function callOpenAIAppraisal8({ query, fused, apiPricing, webSnippets }, signal) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are an expert appraiser for collectibles (cards, pogs, retro games, stamps, toys, comics). ' +
+            'Always start with: `If this [item type] is authentic, its value would be ...` ' +
+            'Return JSON with keys: ' +
+            '{ "intro": string, "details": string, "market_trends": string, "regional_variations": string, ' +
+            '"counterfeit_risks": [string], "verification_methods": [string], "next_steps": [string], ' +
+            '"ebay_listing": string }'
+        },
+        {
+          role: 'user',
+          content: JSON.stringify({ query, fused, apiPricing, webSnippets })
+        }
+      ]
+    }),
+    signal
+  });
+  if (!r.ok) throw new Error(await r.text().catch(() => `OpenAI HTTP ${r.status}`));
+  const j = await r.json();
+  return JSON.parse(j?.choices?.[0]?.message?.content || '{}');
+}
+
+/* ---------------------- Main handler ---------------------- */
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-    const { question, context } = (req.body ?? {});
-    if (!question) return res.status(400).json({ error: 'Missing question' });
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: 'Server misconfig: OPENAI_API_KEY missing' });
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
+    const { question, context } = (req.body ?? {});
+    if (!question) return res.status(400).json({ error: 'Missing question' });
 
-    // 1) Extraction structurée (JSON)
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+
+    // 1) Extraction: catégorie + champs utiles
     const extract = await callOpenAIJson([
       {
         role: 'system',
         content:
-          'You are a collectibles extraction agent. From the user query, output compact JSON with fields: ' +
-          'game (pokemon|mtg|yugioh|other|unknown), name, set, edition, language, number, rarity, condition_notes (array of strings). ' +
-          'Only return JSON.'
+          'Extract compact JSON for a collectible query. Keys: ' +
+          '{ "category": "pokemon|mtg|yugioh|retro_video_game|postage_stamp|toy_or_figurine|comic_book|pogs|other", ' +
+          '"item_type": string, "name": string, "set": string, "platform": string, "brand": string, "franchise": string, ' +
+          '"issue_number": string, "variant": string, "year": string, "region": string, "language": string, ' +
+          '"condition_notes": [string] }. Only JSON.'
       },
-      {
-        role: 'user',
-        content: context ? `${question}\n\nContext:\n${context}` : question
-      }
+      { role: 'user', content: context ? `${question}\n\nContext:\n${context}` : question }
     ], controller.signal);
 
     const query = {
-      game: extract.game || 'unknown',
+      category: extract.category || 'other',
+      item_type: extract.item_type || '',
       name: extract.name || '',
       set: extract.set || '',
-      edition: extract.edition || '',
+      platform: extract.platform || '',
+      brand: extract.brand || '',
+      franchise: extract.franchise || '',
+      issue_number: extract.issue_number || '',
+      variant: extract.variant || '',
+      year: extract.year || '',
+      region: extract.region || '',
       language: extract.language || '',
-      number: extract.number || '',
-      rarity: extract.rarity || '',
       condition_notes: Array.isArray(extract.condition_notes) ? extract.condition_notes : []
     };
 
-    // 2) Enrichissement web (prix)
-    const pricing = await enrichPrices({ game: query.game, name: query.name, set: query.set });
+    // 2) APIs spécialisées (si trading cards)
+    let apiPricing = {};
+    if (['pokemon', 'mtg', 'yugioh'].includes(query.category)) {
+      const [mtg, ygo, pokemon] = await Promise.all([
+        query.category === 'mtg' ? fetchMTGPrices({ name: query.name, set: query.set }).catch(()=>null) : null,
+        query.category === 'yugioh' ? fetchYGOPrices({ name: query.name }).catch(()=>null) : null,
+        query.category === 'pokemon' ? fetchPokemonPrices({ name: query.name, set: query.set }).catch(()=>null) : null
+      ]);
+      apiPricing = { mtg, ygo, pokemon };
+    }
+
+    // 3) Recherche web (nécessite TAVILY_API_KEY ou SERPER_API_KEY)
+    const queries = buildQueriesForCategory(query.category, query);
+    const webSnippets = await webSearchPricingSignalsGeneric(queries);
+
+    // 4) Fusion estimation
+    const fused = await callOpenAIPriceFusion({ query, apiPricing, webSnippets }, controller.signal).catch(()=>null);
+
+    // 5) Rapport 8 sections
+    const sections = await callOpenAIAppraisal8({ query, fused, apiPricing, webSnippets }, controller.signal).catch(()=>null);
 
     clearTimeout(timer);
-
-    const summary = buildSummary({ query, pricing });
 
     res.status(200).json({
       ok: true,
       query,
-      pricing,
-      summary
+      apiPricing,
+      web: webSnippets,
+      fused,
+      sections
     });
   } catch (e) {
-    res.status(502).json({ error: 'Ask enrich failed', detail: String(e?.message ?? e) });
+    res.status(502).json({ error: 'Ask pipeline failed', detail: String(e?.message ?? e) });
   }
 }
