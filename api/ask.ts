@@ -1,9 +1,6 @@
 export default async function handler(req: Request) {
   try {
-    if (req.method !== 'POST') {
-      return new Response('Method Not Allowed', { status: 405 });
-    }
-
+    if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
     const { question, context } = await req.json().catch(() => ({}));
     if (!question) {
       return new Response(JSON.stringify({ error: 'Missing question' }), {
@@ -44,7 +41,6 @@ export default async function handler(req: Request) {
     return new Response(JSON.stringify({ answer }), {
       status: 200, headers: { 'Content-Type': 'application/json' }
     });
-
   } catch (e: any) {
     return new Response(JSON.stringify({ error: 'Unhandled server error', detail: String(e?.message ?? e) }), {
       status: 500, headers: { 'Content-Type': 'application/json' }
