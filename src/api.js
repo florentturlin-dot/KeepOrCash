@@ -1,5 +1,5 @@
-// src/api.js — appels avec timeout + surfacer "detail" si erreur
-async function postJSON(url, body, ms = 25000) {
+// src/api.js — appels avec timeout & erreurs détaillées
+async function postJSON(url, body, ms = 35000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -16,12 +16,10 @@ async function postJSON(url, body, ms = 25000) {
       throw new Error(msg);
     }
     return data;
-  } finally {
-    clearTimeout(t);
-  }
+  } finally { clearTimeout(t); }
 }
 
-async function postForm(url, fd, ms = 25000) {
+async function postForm(url, fd, ms = 35000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -33,15 +31,12 @@ async function postForm(url, fd, ms = 25000) {
       throw new Error(msg);
     }
     return data;
-  } finally {
-    clearTimeout(t);
-  }
+  } finally { clearTimeout(t); }
 }
 
 export async function ask(question, context) {
   return await postJSON('/api/ask', { question, context });
 }
-
 export async function uploadFile(file) {
   const fd = new FormData();
   fd.append('file', file);
