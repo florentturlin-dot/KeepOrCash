@@ -1,8 +1,7 @@
-// src/api.js — Frontend helpers with timeouts; surfaces server "detail" for easier debugging.
-
+// src/api.js — appels avec timeout + surfacer "detail" si erreur
 async function postJSON(url, body, ms = 25000) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
+  const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const r = await fetch(url, {
       method: 'POST',
@@ -18,13 +17,13 @@ async function postJSON(url, body, ms = 25000) {
     }
     return data;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(t);
   }
 }
 
 async function postForm(url, fd, ms = 25000) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), ms);
+  const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const r = await fetch(url, { method: 'POST', body: fd, signal: ctrl.signal });
     let data = {};
@@ -35,22 +34,16 @@ async function postForm(url, fd, ms = 25000) {
     }
     return data;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(t);
   }
 }
 
 export async function ask(question, context) {
-  const data = await postJSON('/api/ask', { question, context });
-  return data?.answer || '';
+  return await postJSON('/api/ask', { question, context });
 }
 
 export async function uploadFile(file) {
   const fd = new FormData();
   fd.append('file', file);
   return await postForm('/api/upload', fd);
-}
-
-// Optional multi-turn chat
-export async function chat(messages) {
-  return await postJSON('/api/chat', { messages });
 }
