@@ -1,11 +1,10 @@
 // api/upload.js
-// Analyse image: extraction JSON (vision) + enrichissement prix via APIs publiques.
-// Requiert: OPENAI_API_KEY
-// Optionnel: POKEMON_TCG_API_KEY
+// Analyse image avec pipeline complet (vision + web + 8 sections)
 export const config = { runtime: 'edge' };
 
 const OPENAI_MODEL = (typeof process !== 'undefined' && process.env.OPENAI_MODEL) || 'gpt-4o';
 
+/* ---------------------- Helpers ---------------------- */
 function toBase64(buf) {
   let binary = '';
   const bytes = new Uint8Array(buf);
@@ -15,51 +14,13 @@ function toBase64(buf) {
   }
   return btoa(binary);
 }
-
-async function callOpenAIJsonVision(prompt, dataUrl) {
-  const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      response_format: { type: 'json_object' },
-      temperature: 0.2,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a collectibles photo extraction agent. From the image, output JSON with fields: ' +
-            'game (pokemon|mtg|yugioh|other|unknown), name, set, edition (e.g., 1st Edition/Unlimited/Shadowless), language, number, rarity, ' +
-            'condition_notes (array of short strings), raw_text (OCR-ish important text). Only return JSON.'
-        },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ]
-        }
-      ]
-    })
-  });
-  if (!resp.ok) {
-    const detail = await resp.text().catch(() => '');
-    throw new Error(detail || `OpenAI HTTP ${resp.status}`);
-  }
-  const data = await resp.json();
-  const content = data?.choices?.[0]?.message?.content || '{}';
-  return JSON.parse(content);
-}
-
-// ---------- Pricing helpers (Edge) ----------
 async function fetchJSON(url, headers) {
   const r = await fetch(url, { headers });
   if (!r.ok) return null;
   return await r.json();
 }
+
+/* ---------------------- Card APIs (Edge) ---------------------- */
 async function fetchMTGPrices({ name, set }) {
   if (!name) return null;
   const query = `!"${name}" unique:prints${set ? ` set:${set.replaceAll('"','')}` : ''}`;
@@ -121,121 +82,216 @@ async function fetchPokemonPrices({ name, set }) {
     prices: card?.tcgplayer?.prices || card?.cardmarket?.prices || {}
   };
 }
-async function enrichPrices({ game, name, set }) {
-  const g = (game || '').toLowerCase();
-  if (g.includes('mtg') || g.includes('magic')) {
-    const mtg = await fetchMTGPrices({ name, set });
-    return { game: 'mtg', mtg };
+
+/* ---------------------- Web search (Edge) ---------------------- */
+async function tavilySearch(query) {
+  const key = (typeof process !== 'undefined' && process.env.TAVILY_API_KEY) || null;
+  if (!key) return null;
+  const r = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      api_key: key,
+      query,
+      search_depth: 'advanced',
+      include_answer: false,
+      include_images: false,
+      include_raw_content: false,
+      max_results: 6
+    })
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  return (j?.results || []).map(x => ({ title: x.title, url: x.url, snippet: x.content || x.snippet || '' }));
+}
+async function serperSearch(query) {
+  const key = (typeof process !== 'undefined' && process.env.SERPER_API_KEY) || null;
+  if (!key) return null;
+  const r = await fetch('https://google.serper.dev/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-API-KEY': key },
+    body: JSON.stringify({ q: query, gl: 'us', num: 8 })
+  });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const items = [...(j?.organic || []), ...(j?.shopping || [])];
+  return items.map(it => ({ title: it.title, url: it.link, snippet: it.snippet || it.price || '' }));
+}
+function uniqByHost(list) {
+  const seen = new Set();
+  const out = [];
+  for (const r of list || []) {
+    try {
+      const host = new URL(r.url).host.replace(/^www\./, '');
+      if (seen.has(host)) continue;
+      seen.add(host);
+      out.push(r);
+    } catch {}
   }
-  if (g.includes('yugioh') || g.includes('yu-gi')) {
-    const ygo = await fetchYGOPrices({ name });
-    return { game: 'yugioh', ygo };
+  return out;
+}
+function buildQueriesForCategory(cat, q) {
+  const base = [q.name, q.set, q.platform, q.brand, q.franchise, q.issue_number, q.variant, q.year].filter(Boolean).join(' ');
+  switch (cat) {
+    case 'pokemon':
+    case 'mtg':
+    case 'yugioh':
+      return [`${base} price`, `${base} tcgplayer price`, `${base} ebay sold`, `${base} graded psa price`];
+    case 'retro_video_game':
+      return [`${base} pricecharting`, `${base} ebay sold`, `${base} cib price`, `${base} sealed price`];
+    case 'postage_stamp':
+      return [`${base} Scott value`, `${base} StampWorld`, `${base} ebay sold`];
+    case 'toy_or_figurine':
+      return [`${base} action figure price`, `${base} ebay sold`, `${base} sealed`, `${base} loose`];
+    case 'comic_book':
+      return [`${base} cgc 9.8 price`, `${base} heritage auctions`, `${base} ebay sold`, `${base} gocollect`];
+    case 'pogs':
+      return [`${base} pogs price`, `${base} slammer price`, `${base} ebay sold`];
+    default:
+      return [`${base} price`, `${base} ebay sold`];
   }
-  if (g.includes('pokemon') || g.includes('pokémon')) {
-    const pkm = await fetchPokemonPrices({ name, set });
-    return { game: 'pokemon', pokemon: pkm };
+}
+async function webSearchPricingSignalsGeneric(queries) {
+  let results = [];
+  for (const q of queries) {
+    const a = await tavilySearch(q).catch(() => null);
+    const b = await serperSearch(q).catch(() => null);
+    results = results.concat(a || []).concat(b || []);
   }
-  const [mtg, ygo, pkm] = await Promise.all([
-    fetchMTGPrices({ name, set }).catch(() => null),
-    fetchYGOPrices({ name }).catch(() => null),
-    fetchPokemonPrices({ name, set }).catch(() => null)
-  ]);
-  return { game: 'unknown', mtg, ygo, pokemon: pkm };
+  return uniqByHost(results).slice(0, 10);
 }
 
-function buildSummary({ query, pricing }) {
-  const lines = [];
-  lines.push(`**Item détecté**: ${query.name || 'inconnu'}`);
-  if (query.game) lines.push(`**Jeu**: ${query.game}`);
-  if (query.set) lines.push(`**Édition/Set**: ${query.set}`);
-  if (query.edition) lines.push(`**Tirage**: ${query.edition}`);
-  if (query.language) lines.push(`**Langue**: ${query.language}`);
-  if (query.number) lines.push(`**Numéro**: ${query.number}`);
-  if (query.rarity) lines.push(`**Rareté**: ${query.rarity}`);
-  if (query.condition_notes?.length) lines.push(`**État (indices)**: ${query.condition_notes.join(', ')}`);
-
-  const p = pricing || {};
-  if (p.mtg?.prices || p.ygo?.prices || p.pokemon?.prices) {
-    lines.push('');
-    lines.push('**Prix estimés (indicatifs)**:');
-  }
-  if (p.mtg?.prices) {
-    const pr = p.mtg.prices;
-    lines.push(`- MTG/Scryfall (${p.mtg.set_name || 'set ?'}): USD ${pr.usd || '-'} (non-foil), USD foil ${pr.usd_foil || '-'}, EUR ${pr.eur || '-'} | Source: ${p.mtg.url}`);
-  }
-  if (p.ygo?.prices) {
-    const pr = p.ygo.prices;
-    lines.push(`- Yu-Gi-Oh!/YGOPRODeck: TCGplayer $${pr.tcgplayer || '-'}, eBay $${pr.ebay || '-'}, Amazon $${pr.amazon || '-'} | Source: ${p.ygo.url}`);
-  }
-  if (p.pokemon?.prices) {
-    lines.push(`- Pokémon/TCG API: voir grilles (normal/holo/foil) | Source: ${p.pokemon.url}`);
-  }
-
-  lines.push('');
-  lines.push('_Note_: Les prix varient selon l’état exact et la version. Photos recto/verso, bonne lumière, bords nets, symbole d’édition visible.');
-  return lines.join('\n');
+/* ---------------------- OpenAI JSON (vision extract / fusion / appraisal) ---------------------- */
+async function callOpenAIJsonVision(prompt, dataUrl) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'From the image, extract JSON: { "category": "pokemon|mtg|yugioh|retro_video_game|postage_stamp|toy_or_figurine|comic_book|pogs|other", ' +
+            '"item_type": string, "name": string, "set": string, "platform": string, "brand": string, "franchise": string, "issue_number": string, ' +
+            '"variant": string, "year": string, "region": string, "language": string, "condition_notes": [string] }. Only JSON.'
+        },
+        { role: 'user', content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: dataUrl } }
+        ] }
+      ]
+    })
+  });
+  if (!r.ok) throw new Error(await r.text().catch(() => `OpenAI HTTP ${r.status}`));
+  const j = await r.json();
+  return JSON.parse(j?.choices?.[0]?.message?.content || '{}');
 }
 
+async function callOpenAIPriceFusion(query, apiPricing, webSnippets) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      messages: [
+        { role: 'system', content: 'Fuse pricing. Output JSON: {estimate_low,estimate_high,currency,reasoning,sources:[{title,url}]}' },
+        { role: 'user', content: JSON.stringify({ query, apiPricing, webSnippets }) }
+      ]
+    })
+  });
+  if (!r.ok) throw new Error(await r.text().catch(() => `OpenAI HTTP ${r.status}`));
+  const j = await r.json();
+  return JSON.parse(j?.choices?.[0]?.message?.content || '{}');
+}
+async function callOpenAIAppraisal8(query, fused, apiPricing, webSnippets) {
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      response_format: { type: 'json_object' },
+      temperature: 0.2,
+      messages: [
+        { role: 'system',
+          content: 'Return JSON with 8 sections: {intro, details, market_trends, regional_variations, counterfeit_risks:[string], verification_methods:[string], next_steps:[string], ebay_listing}. Always start intro with: "If this [item type] is authentic, its value would be ...".'
+        },
+        { role: 'user', content: JSON.stringify({ query, fused, apiPricing, webSnippets }) }
+      ]
+    })
+  });
+  if (!r.ok) throw new Error(await r.text().catch(() => `OpenAI HTTP ${r.status}`));
+  const j = await r.json();
+  return JSON.parse(j?.choices?.[0]?.message?.content || '{}');
+}
+
+/* ---------------------- Handler ---------------------- */
 export default async function handler(req) {
   try {
     if (req.method === 'OPTIONS') return new Response(null, { status: 204 });
     if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-    if (!process.env.OPENAI_API_KEY) {
-      return new Response(JSON.stringify({ error: 'Server misconfig: OPENAI_API_KEY missing' }), {
-        status: 500, headers: { 'Content-Type': 'application/json' }
-      });
-    }
+    if (!process.env.OPENAI_API_KEY) return new Response(JSON.stringify({ error: 'Server misconfig: OPENAI_API_KEY missing' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
 
     const form = await req.formData();
     const file = form.get('file');
-    if (!file) {
-      return new Response(JSON.stringify({ error: 'No file provided' }), {
-        status: 400, headers: { 'Content-Type': 'application/json' }
-      });
-    }
-    if (file.size > 4_500_000) {
-      return new Response(JSON.stringify({ error: 'File too large (~4.5MB limit). Please resize/compress.' }), {
-        status: 413, headers: { 'Content-Type': 'application/json' }
-      });
-    }
+    if (!file) return new Response(JSON.stringify({ error: 'No file provided' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    if (file.size > 4_500_000) return new Response(JSON.stringify({ error: 'File too large (~4.5MB limit).' }), { status: 413, headers: { 'Content-Type': 'application/json' } });
 
     const bytes = await file.arrayBuffer();
     const dataUrl = `data:${file.type || 'image/jpeg'};base64,${toBase64(bytes)}`;
 
-    // 1) Extraction vision -> JSON
-    const extract = await callOpenAIJsonVision(
-      'Analyse l’image et renvoie UNIQUEMENT du JSON selon le schéma demandé.',
-      dataUrl
-    );
-
+    // 1) Vision extract
+    const extract = await callOpenAIJsonVision('Return ONLY JSON per the schema.', dataUrl);
     const query = {
-      game: extract.game || 'unknown',
+      category: extract.category || 'other',
+      item_type: extract.item_type || '',
       name: extract.name || '',
       set: extract.set || '',
-      edition: extract.edition || '',
+      platform: extract.platform || '',
+      brand: extract.brand || '',
+      franchise: extract.franchise || '',
+      issue_number: extract.issue_number || '',
+      variant: extract.variant || '',
+      year: extract.year || '',
+      region: extract.region || '',
       language: extract.language || '',
-      number: extract.number || '',
-      rarity: extract.rarity || '',
-      condition_notes: Array.isArray(extract.condition_notes) ? extract.condition_notes : [],
-      raw_text: extract.raw_text || ''
+      condition_notes: Array.isArray(extract.condition_notes) ? extract.condition_notes : []
     };
 
-    // 2) Enrichissement prix
-    const pricing = await enrichPrices({ game: query.game, name: query.name, set: query.set });
+    // 2) APIs spécialisées si cartes
+    let apiPricing = {};
+    if (['pokemon', 'mtg', 'yugioh'].includes(query.category)) {
+      const [mtg, ygo, pokemon] = await Promise.all([
+        query.category === 'mtg' ? fetchMTGPrices({ name: query.name, set: query.set }).catch(()=>null) : null,
+        query.category === 'yugioh' ? fetchYGOPrices({ name: query.name }).catch(()=>null) : null,
+        query.category === 'pokemon' ? fetchPokemonPrices({ name: query.name, set: query.set }).catch(()=>null) : null
+      ]);
+      apiPricing = { mtg, ygo, pokemon };
+    }
 
-    const summary = buildSummary({ query, pricing });
+    // 3) Web search
+    const queries = buildQueriesForCategory(query.category, query);
+    const webSnippets = await webSearchPricingSignalsGeneric(queries);
+
+    // 4) Fusion + 5) Rapport
+    const fused = await callOpenAIPriceFusion(query, apiPricing, webSnippets).catch(()=>null);
+    const sections = await callOpenAIAppraisal8(query, fused, apiPricing, webSnippets).catch(()=>null);
 
     return new Response(JSON.stringify({
       ok: true,
       file: { name: file.name, type: file.type, size: bytes.byteLength },
       query,
-      pricing,
-      summary
+      apiPricing,
+      web: webSnippets,
+      fused,
+      sections
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 
   } catch (e) {
-    return new Response(JSON.stringify({ error: 'Upload enrich failed', detail: String(e?.message ?? e) }), {
-      status: 502, headers: { 'Content-Type': 'application/json' }
-    });
+    return new Response(JSON.stringify({ error: 'Upload pipeline failed', detail: String(e?.message ?? e) }), { status: 502, headers: { 'Content-Type': 'application/json' } });
   }
 }
